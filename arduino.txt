@@ -1,0 +1,143 @@
+#include <SPI.h>
+#include <avr/io.h>
+
+// Definiciones de pines
+int const camera_interrupt_pin = 3; // interrupt 0
+int const camera_interrupt_compare_pin = 2; // interrupt 1
+
+int const calibration_leds_pin = A5; // A5
+int const ir_led_pin = A4; // A4
+
+// Tiempo en microsegundos para la sincronización
+long syncbar_onperiod = 32000L;
+
+// Variables globales para control de LEDs y temporización
+volatile int syncled_state = 0;
+volatile bool donothing = false;
+volatile unsigned long ledonperiod = 80UL;
+volatile unsigned long leddelayon = 192UL;
+volatile unsigned long overtakes = 0UL;
+volatile unsigned long extcounter;
+volatile unsigned long extovertakes;
+volatile bool newexternalclock = false;
+volatile unsigned long cameracounter;
+volatile unsigned long cameraovertakes;
+volatile bool newcameraframe = false;
+volatile bool turnoff_timer2 = false;
+volatile int WHATISHIGH = LOW;
+volatile int WHATISLOW = HIGH;
+
+// Configuración de temporizadores
+void setup() {  
+  cli(); // Desactiva interrupciones
+  TCCR1A = 0;  // Configuración del temporizador 1
+  TCCR1B = 0;
+  TCNT1 = 0;   // Inicializa el contador
+
+  unsigned long tmp = 2UL * syncbar_onperiod - 1;
+  OCR1A = tmp;  // Configura el comparador para el temporizador 1
+
+  TCCR1B |= (1 << WGM12);  // Configura el modo CTC
+  TCCR1B |= (1 << CS11);   // Configura el prescaler de 8
+  TIMSK1 |= (1 << OCIE1A); // Habilita interrupciones de comparación en el temporizador 1
+
+  // Configuración de temporizador 2
+  TCCR2A = 0;
+  TCCR2B = 0;
+  TCCR2A |= (1 << WGM21);  // Configura el modo CTC
+  TCCR2B |= (1 << CS22) | (1 << CS21);  // Prescaler de 256
+  TIMSK2 &= ~(1 << OCIE2A);  // Deshabilita la interrupción de comparación en el temporizador 2
+
+  sei();  // Habilita interrupciones globales
+
+  pinMode(camera_interrupt_pin, INPUT);
+  digitalWrite(camera_interrupt_pin, LOW);
+  attachInterrupt(0, int0, RISING);  // Interrupción para la cámara
+  pinMode(camera_interrupt_compare_pin, INPUT);
+  digitalWrite(camera_interrupt_compare_pin, LOW);
+  attachInterrupt(1, int1, RISING);  // Interrupción para la cámara
+
+  pinMode(calibration_leds_pin, OUTPUT);
+  pinMode(ir_led_pin, OUTPUT);
+  digitalWrite(calibration_leds_pin, WHATISHIGH);
+  digitalWrite(ir_led_pin, WHATISLOW);
+
+  // Comunicación serial
+  Serial.begin(115200);
+  while (!Serial);  // Espera la enumeración
+}
+
+void loop() {
+  if (Serial.available() > 0) {
+    byte inByte = Serial.read();
+    if (inByte == 's') {
+      donothing = true;  // Pausa temporal para hacer nada
+    }
+  }
+}
+
+void setLeds(volatile int &state) {
+  if (state == 0) {
+    // Primer pulso de LED (pupila oscura)
+    digitalWrite(calibration_leds_pin, WHATISHIGH);
+    digitalWrite(ir_led_pin, WHATISLOW);
+    state++;
+  }
+  else if (state == 2) {
+    // Segundo pulso de LED (pupila brillante)
+    digitalWrite(ir_led_pin, WHATISHIGH);
+    digitalWrite(calibration_leds_pin, WHATISLOW);
+    state++;
+  }
+  else if (state == 1 || state == 3) {
+    // Ambos LEDs encendidos
+    digitalWrite(ir_led_pin, WHATISHIGH);
+    digitalWrite(calibration_leds_pin, WHATISHIGH);
+  }
+}
+
+// Interrupción externa (reconocimiento de reloj externo)
+void int0() {
+  // Guardar el contador del temporizador
+  extcounter = TCNT1;
+  extovertakes = overtakes;
+  newexternalclock = true;
+
+  if (donothing) {
+    donothing = false;
+    return;
+  }
+
+  syncled_state++;
+  if (syncled_state > 3) {
+    syncled_state = 0;
+  }
+
+  if (syncled_state == 0 || syncled_state == 2) {
+    // Configuración de temporizador 2
+    TCNT2 = 0;
+    long tmp = leddelayon / 16L - 1;
+    OCR2A = tmp;
+    TIMSK2 |= (1 << OCIE2A);  // Habilita interrupción de temporizador 2
+  }
+}
+
+// Interrupción de la cámara (reconocimiento de fotogramas)
+void int1() {
+  cameracounter = TCNT1;
+  cameraovertakes = overtakes;
+  newcameraframe = true;
+}
+
+// Interrupción de temporizador 1 (para contar los ciclos de reloj)
+ISR(TIMER1_COMPA_vect) {
+  overtakes++;
+}
+
+// Interrupción de temporizador 2 (para controlar el encendido de los LEDs)
+ISR(TIMER2_COMPA_vect) {
+  setLeds(syncled_state);
+  TCNT2 = 0;  // Reinicia el contador del temporizador 2
+  OCR2A = 0xFF;  // El temporizador 2 es de 8 bits, el valor máximo es 0xFF
+}
+
